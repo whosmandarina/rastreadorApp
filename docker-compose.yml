@@ -1,0 +1,50 @@
+
+services:
+  # Servicio para la base de datos MySQL
+  db:
+    image: mysql:8.0
+    container_name: rastreador_db_container
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+    ports:
+      - "${DB_PORT}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./database/data/schema.sql:/docker-entrypoint-initdb.d/init.sql
+
+  # Servicio para la API Node.js
+  app:
+    build: .
+    container_name: rastreador_api_container
+    restart: always
+    ports:
+      - "${PORT}:3000"
+    environment:
+      - PORT=${PORT}
+      - DB_HOST=db
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - DB_PORT=3306
+    depends_on:
+      - db
+
+  # Interfaz gráfica para gestionar MySQL
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: rastreador_phpmyadmin
+    restart: always
+    ports:
+      - "8080:80"
+    environment:
+      PMA_HOST: db
+      PMA_PORT: 3306
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+    depends_on:
+      - db
+
+# Volúmenes para persistir datos de la BD
+volumes:
+  mysql_data:
