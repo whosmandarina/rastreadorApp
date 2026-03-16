@@ -51,15 +51,10 @@ exports.getStats = async (req, res) => {
 
         for (let i = 0; i < locations.length; i++) {
             const loc = locations[i];
-            
-            // Promedio de velocidad
             if (loc.velocidad !== null && loc.velocidad > 0) {
                 totalSpeed += loc.velocidad;
                 speedCount++;
             }
-
-            // Lógica simple para detectar paradas: Velocidad < 2 km/h o distancia entre puntos muy corta durante un tiempo prolongado
-            // Aquí simplificaremos asumiendo que si la velocidad reportada es < 2, está parado.
             const vel = loc.velocidad || 0;
             if (vel < 2) {
                 if (!posibleParada) {
@@ -70,7 +65,7 @@ exports.getStats = async (req, res) => {
             } else {
                 if (posibleParada) {
                     const duracionMinutos = (new Date(posibleParada.end) - new Date(posibleParada.start)) / 1000 / 60;
-                    if (duracionMinutos >= 3) { // Consideramos parada si estuvo más de 3 minutos
+                    if (duracionMinutos >= 3) {
                         paradas.push({ ...posibleParada, duracion_minutos: duracionMinutos });
                     }
                     posibleParada = null;
@@ -78,7 +73,6 @@ exports.getStats = async (req, res) => {
             }
         }
 
-        // Si terminó el periodo y seguía parado
         if (posibleParada) {
             const duracionMinutos = (new Date(posibleParada.end) - new Date(posibleParada.start)) / 1000 / 60;
             if (duracionMinutos >= 3) {
@@ -107,29 +101,151 @@ exports.exportPDF = async (req, res) => {
         const { userId } = req.params;
         const { startDate, endDate } = req.query;
 
-        // Obtener info básica del usuario para el reporte
+        if (!startDate || !endDate) {
+            return res.status(400).json({ message: 'Se requieren startDate y endDate' });
+        }
+
         const [users] = await db.query('SELECT nombre, correo FROM Users WHERE id_user = ?', [userId]);
         const user = users[0];
-
         if (!user) return res.status(404).json({ message: 'Usuario no encontrado' });
 
-        const doc = new PDFDocument();
-        
+        // Obtener ubicaciones igual que el Excel
+        const [locations] = await db.query(
+            'SELECT latitud, longitud, velocidad, bateria, timestamp_captura FROM Locations WHERE id_user = ? AND timestamp_captura BETWEEN ? AND ? ORDER BY timestamp_captura ASC',
+            [userId, new Date(startDate), new Date(endDate)]
+        );
+
+        // Calcular stats para el resumen
+        let totalSpeed = 0, speedCount = 0, paradas = [], posibleParada = null;
+        for (const loc of locations) {
+            if (loc.velocidad > 0) { totalSpeed += loc.velocidad; speedCount++; }
+            if ((loc.velocidad || 0) < 2) {
+                if (!posibleParada) posibleParada = { start: loc.timestamp_captura, end: loc.timestamp_captura };
+                else posibleParada.end = loc.timestamp_captura;
+            } else {
+                if (posibleParada) {
+                    const dur = (new Date(posibleParada.end) - new Date(posibleParada.start)) / 60000;
+                    if (dur >= 3) paradas.push({ ...posibleParada, duracion_minutos: dur.toFixed(1) });
+                    posibleParada = null;
+                }
+            }
+        }
+        if (posibleParada) {
+            const dur = (new Date(posibleParada.end) - new Date(posibleParada.start)) / 60000;
+            if (dur >= 3) paradas.push({ ...posibleParada, duracion_minutos: dur.toFixed(1) });
+        }
+        const velocidadPromedio = speedCount > 0 ? (totalSpeed / speedCount).toFixed(1) : '0.0';
+        const tiempoParado = paradas.reduce((a, p) => a + parseFloat(p.duracion_minutos), 0).toFixed(1);
+
+        // ── Construir PDF ──
+        const doc = new PDFDocument({ margin: 40, size: 'A4' });
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename=Reporte_${user.nombre.replace(/ /g, '_')}.pdf`);
-        
         doc.pipe(res);
 
-        doc.fontSize(20).text(`Reporte de Actividad: ${user.nombre}`, { align: 'center' });
-        doc.moveDown();
-        doc.fontSize(12).text(`Correo: ${user.correo}`);
-        doc.text(`Periodo: ${new Date(startDate).toLocaleString()} al ${new Date(endDate).toLocaleString()}`);
-        doc.moveDown();
-        
-        doc.text('Este es un reporte generado automáticamente por el sistema de rastreo.', { align: 'justify' });
-        // Aquí se podrían añadir tablas con las alertas o resúmenes de paradas.
-        // Para simplificar, finalizamos el documento.
-        
+        // ── Encabezado ──
+        doc.rect(0, 0, doc.page.width, 80).fill('#02182b');
+        doc.fillColor('#ffffff').fontSize(20).font('Helvetica-Bold')
+            .text('REPORTE DE ACTIVIDAD', 40, 25, { align: 'center' });
+        doc.fillColor('#9dd9d2').fontSize(11)
+            .text('Sistema de Rastreo', 40, 50, { align: 'center' });
+        doc.moveDown(3);
+
+        // ── Info del usuario ──
+        doc.fillColor('#02182b').fontSize(13).font('Helvetica-Bold').text('Información del Usuario');
+        doc.moveTo(40, doc.y).lineTo(doc.page.width - 40, doc.y).strokeColor('#daeeed').lineWidth(1).stroke();
+        doc.moveDown(0.5);
+        doc.fontSize(11).font('Helvetica').fillColor('#3a5a6e')
+            .text(`Nombre:   ${user.nombre}`)
+            .text(`Correo:   ${user.correo}`)
+            .text(`Período:  ${new Date(startDate).toLocaleString('es-MX')} — ${new Date(endDate).toLocaleString('es-MX')}`);
+        doc.moveDown(1.5);
+
+        // ── Resumen estadístico ──
+        doc.fillColor('#02182b').fontSize(13).font('Helvetica-Bold').text('Resumen del Período');
+        doc.moveTo(40, doc.y).lineTo(doc.page.width - 40, doc.y).strokeColor('#daeeed').lineWidth(1).stroke();
+        doc.moveDown(0.5);
+        doc.fontSize(11).font('Helvetica').fillColor('#3a5a6e')
+            .text(`Total de puntos registrados:   ${locations.length}`)
+            .text(`Velocidad promedio:            ${velocidadPromedio} km/h`)
+            .text(`Tiempo total detenido:         ${tiempoParado} minutos`)
+            .text(`Paradas detectadas (≥3 min):   ${paradas.length}`);
+        doc.moveDown(1.5);
+
+        // ── Paradas ──
+        if (paradas.length > 0) {
+            doc.fillColor('#02182b').fontSize(13).font('Helvetica-Bold').text('Paradas Detectadas');
+            doc.moveTo(40, doc.y).lineTo(doc.page.width - 40, doc.y).strokeColor('#daeeed').lineWidth(1).stroke();
+            doc.moveDown(0.5);
+            paradas.forEach((p, i) => {
+                doc.fontSize(10).font('Helvetica').fillColor('#3a5a6e')
+                    .text(`${i + 1}.  Inicio: ${new Date(p.start).toLocaleString('es-MX')}   →   Fin: ${new Date(p.end).toLocaleString('es-MX')}   (${p.duracion_minutos} min)`);
+            });
+            doc.moveDown(1.5);
+        }
+
+        // ── Tabla de ubicaciones ──
+        doc.fillColor('#02182b').fontSize(13).font('Helvetica-Bold').text('Historial de Ubicaciones');
+        doc.moveTo(40, doc.y).lineTo(doc.page.width - 40, doc.y).strokeColor('#daeeed').lineWidth(1).stroke();
+        doc.moveDown(0.5);
+
+        if (locations.length === 0) {
+            doc.fontSize(11).font('Helvetica').fillColor('#6b8a9a')
+                .text('No se registraron ubicaciones en este período.');
+        } else {
+            // Encabezados de tabla
+            const tableTop = doc.y;
+            const colWidths = [140, 80, 85, 80, 70];
+            const colX = [40, 180, 260, 345, 425];
+            const headers = ['Fecha y Hora', 'Latitud', 'Longitud', 'Velocidad', 'Batería'];
+
+            doc.rect(40, tableTop, doc.page.width - 80, 18).fill('#249a98');
+            headers.forEach((h, i) => {
+                doc.fillColor('#ffffff').fontSize(9).font('Helvetica-Bold')
+                    .text(h, colX[i], tableTop + 4, { width: colWidths[i], align: 'left' });
+            });
+            doc.y = tableTop + 22;
+
+            // Filas — máximo 200 para no exceder el PDF
+            const maxRows = Math.min(locations.length, 200);
+            for (let i = 0; i < maxRows; i++) {
+                const loc = locations[i];
+                const rowY = doc.y;
+                const bg = i % 2 === 0 ? '#f0f8f8' : '#ffffff';
+                doc.rect(40, rowY, doc.page.width - 80, 16).fill(bg);
+
+                const rowData = [
+                    new Date(loc.timestamp_captura).toLocaleString('es-MX'),
+                    parseFloat(loc.latitud).toFixed(6),
+                    parseFloat(loc.longitud).toFixed(6),
+                    `${loc.velocidad || 0} km/h`,
+                    `${loc.bateria || 'N/A'}%`,
+                ];
+                rowData.forEach((val, j) => {
+                    doc.fillColor('#3a5a6e').fontSize(8).font('Helvetica')
+                        .text(val, colX[j], rowY + 3, { width: colWidths[j], align: 'left' });
+                });
+                doc.y = rowY + 16;
+
+                // Nueva página si se acaba el espacio
+                if (doc.y > doc.page.height - 60) {
+                    doc.addPage();
+                    doc.y = 40;
+                }
+            }
+
+            if (locations.length > 200) {
+                doc.moveDown(0.5);
+                doc.fontSize(9).fillColor('#6b8a9a')
+                    .text(`* Se muestran los primeros 200 de ${locations.length} registros. Descarga el Excel para el historial completo.`);
+            }
+        }
+
+        // ── Pie de página ──
+        doc.moveDown(2);
+        doc.fontSize(9).fillColor('#6b8a9a').font('Helvetica')
+            .text(`Generado el ${new Date().toLocaleString('es-MX')} — Sistema de Rastreo`, { align: 'center' });
+
         doc.end();
 
     } catch (error) {
