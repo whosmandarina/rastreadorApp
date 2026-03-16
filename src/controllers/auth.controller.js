@@ -3,44 +3,80 @@ const jwt = require('jsonwebtoken');
 const db = require('../config/db');
 const { logAction } = require('../services/audit.service');
 
-// Registro de usuario
+// Registro de usuario con código de supervisor
 exports.register = async (req, res) => {
     try {
-        const { nombre, correo, telefono, identificador_interno, password, rol } = req.body;
+        const { nombre, correo, telefono, password, codigo_supervisor } = req.body;
 
-        // Validar campos requeridos mínimos
-        if (!nombre || !correo || !password || !rol) {
-            return res.status(400).json({ message: 'Nombre, correo, contraseña y rol son obligatorios' });
+        // HU-02: Validación Global de Entradas
+        if (!nombre || !correo || !password || !codigo_supervisor) {
+            return res.status(400).json({ message: 'Nombre, correo, contraseña y código de supervisor son obligatorios' });
         }
 
-        // Verificar si el usuario ya existe
+        // Validación de formato de correo
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(correo)) {
+            return res.status(400).json({ message: 'El formato del correo electrónico no es válido' });
+        }
+        
+        // Validación de caracteres para nombre y teléfono
+        const charsRegex = /^[a-zA-Z0-9\s]+$/;
+        if (!charsRegex.test(nombre)) {
+            return res.status(400).json({ message: 'El nombre solo puede contener letras, números y espacios.' });
+        }
+        if (telefono && !/^[0-9+()\s-]+$/.test(telefono)) {
+            return res.status(400).json({ message: 'El teléfono contiene caracteres no válidos.' });
+        }
+
+
+        // HU-01: Registro con Código de Supervisor
+        // 1. Validar que el código de supervisor existe y corresponde a un SUPERVISOR
+        const [supervisors] = await db.query(
+            'SELECT * FROM Users WHERE id_user = ? AND rol = ? AND is_active = TRUE',
+            [codigo_supervisor, 'SUPERVISOR']
+        );
+
+        if (supervisors.length === 0) {
+            return res.status(400).json({ message: 'Código de supervisor no válido' });
+        }
+        const supervisor = supervisors[0];
+
+        // 2. Verificar si el usuario ya existe
         const [existingUser] = await db.query('SELECT * FROM Users WHERE correo = ?', [correo]);
         if (existingUser.length > 0) {
             return res.status(400).json({ message: 'El correo ya está registrado' });
         }
 
-        // Encriptar contraseña
+        // 3. Crear el nuevo usuario con rol 'USER'
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
 
-        // Insertar usuario
         const [result] = await db.query(
-            'INSERT INTO Users (nombre, correo, telefono, identificador_interno, password, rol) VALUES (?, ?, ?, ?, ?, ?)',
-            [nombre, correo, telefono, identificador_interno || null, hashedPassword, rol]
+            'INSERT INTO Users (nombre, correo, telefono, password, rol) VALUES (?, ?, ?, ?, ?)',
+            [nombre, correo, telefono || null, hashedPassword, 'USER']
         );
-
         const newUserId = result.insertId;
+
+        // 4. Vincular al usuario con su supervisor en la tabla Supervisor_User
+        await db.query(
+            'INSERT INTO Supervisor_User (id_supervisor, id_user) VALUES (?, ?)',
+            [supervisor.id_user, newUserId]
+        );
 
         // Registrar auditoría
         logAction({
-            id_user_action: req.user ? req.user.id : null, // Si un admin lo crea, se registra. Si es auto-registro, es null.
+            id_user_action: null, // Auto-registro
             action_type: 'USER_REGISTER',
             target_entity: 'Users',
             target_id: newUserId,
-            details: `Se registró un nuevo usuario (${nombre}) con el rol ${rol}.`
+            details: `Se registró nuevo usuario (${nombre}) y fue asignado al supervisor ${supervisor.nombre} (ID: ${supervisor.id_user}).`
         });
 
-        res.status(201).json({ message: 'Usuario registrado exitosamente', userId: newUserId });
+        res.status(201).json({ 
+            message: 'Usuario registrado exitosamente. Ahora puede iniciar sesión.', 
+            userId: newUserId 
+        });
+
     } catch (error) {
         console.error('Error en registro:', error);
         res.status(500).json({ message: 'Error en el servidor al registrar usuario' });

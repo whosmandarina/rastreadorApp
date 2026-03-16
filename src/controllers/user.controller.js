@@ -2,10 +2,102 @@ const db = require('../config/db');
 const bcrypt = require('bcryptjs');
 const { logAction } = require('../services/audit.service');
 
-// [ADMIN] Obtener todos los usuarios
+/**
+ * Helper para verificar si un usuario es gestionado por un supervisor específico.
+ * @param {number} userId - El ID del usuario a verificar.
+ * @param {number} supervisorId - El ID del supervisor.
+ * @returns {boolean} - True si el usuario es gestionado por el supervisor.
+ */
+const isUserManagedBySupervisor = async (userId, supervisorId) => {
+    const [link] = await db.query(
+        'SELECT * FROM Supervisor_User WHERE id_user = ? AND id_supervisor = ?',
+        [userId, supervisorId]
+    );
+    return link.length > 0;
+};
+
+// [ADMIN / SUPERVISOR] Crear un nuevo usuario
+exports.createUser = async (req, res) => {
+    try {
+        const { nombre, correo, password, telefono, rol, supervisorId } = req.body; // supervisorId es para el admin
+        const requestingUser = req.user;
+
+        // Validaciones básicas
+        if (!nombre || !correo || !password) {
+            return res.status(400).json({ message: 'Nombre, correo y contraseña son obligatorios.' });
+        }
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(correo)) {
+            return res.status(400).json({ message: 'Formato de correo no válido.' });
+        }
+        const [existing] = await db.query('SELECT id_user FROM Users WHERE correo = ?', [correo]);
+        if (existing.length > 0) {
+            return res.status(400).json({ message: 'El correo ya está en uso.' });
+        }
+
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+        
+        let finalRol = rol;
+        let finalSupervisorId = supervisorId;
+
+        // Lógica específica por rol
+        if (requestingUser.rol === 'SUPERVISOR') {
+            finalRol = 'USER'; // Un supervisor solo puede crear usuarios
+            finalSupervisorId = requestingUser.id; // Se le asigna a él mismo
+        } else if (requestingUser.rol === 'ADMIN') {
+            if (!rol) return res.status(400).json({ message: 'El rol es obligatorio para el administrador.' });
+            if (rol === 'USER' && !supervisorId) {
+                return res.status(400).json({ message: 'Para crear un rol USER, debe proporcionar un `supervisorId`.' });
+            }
+        }
+
+        // Insertar usuario
+        const [result] = await db.query(
+            'INSERT INTO Users (nombre, correo, telefono, password, rol) VALUES (?, ?, ?, ?, ?)',
+            [nombre, correo, telefono || null, hashedPassword, finalRol]
+        );
+        const newUserId = result.insertId;
+
+        // Si es un USER, crear el vínculo con su supervisor
+        if (finalRol === 'USER' && finalSupervisorId) {
+            await db.query('INSERT INTO Supervisor_User (id_supervisor, id_user) VALUES (?, ?)', [finalSupervisorId, newUserId]);
+        }
+
+        logAction({
+            id_user_action: requestingUser.id,
+            action_type: 'USER_CREATE',
+            target_entity: 'Users',
+            target_id: newUserId,
+            details: `El usuario ${requestingUser.id} (${requestingUser.rol}) creó al usuario ${newUserId} con el rol ${finalRol}.`
+        });
+
+        res.status(201).json({ message: 'Usuario creado exitosamente', userId: newUserId });
+
+    } catch (error) {
+        console.error('Error al crear usuario:', error);
+        res.status(500).json({ message: 'Error interno al crear usuario.' });
+    }
+};
+
+// [ADMIN / SUPERVISOR] Obtener usuarios
 exports.getAllUsers = async (req, res) => {
     try {
-        const [users] = await db.query('SELECT id_user, nombre, correo, telefono, rol, is_active, created_at FROM Users ORDER BY id_user DESC');
+        const { rol, id } = req.user;
+        let users;
+
+        if (rol === 'ADMIN') {
+            [users] = await db.query('SELECT id_user, nombre, correo, telefono, rol, is_active, created_at FROM Users ORDER BY id_user DESC');
+        } else if (rol === 'SUPERVISOR') {
+            [users] = await db.query(
+                `SELECT u.id_user, u.nombre, u.correo, u.telefono, u.rol, u.is_active, u.created_at 
+                 FROM Users u
+                 JOIN Supervisor_User su ON u.id_user = su.id_user
+                 WHERE su.id_supervisor = ? 
+                 ORDER BY u.id_user DESC`,
+                [id]
+            );
+        }
         res.json(users);
     } catch (error) {
         console.error('Error al obtener usuarios:', error);
@@ -13,15 +105,22 @@ exports.getAllUsers = async (req, res) => {
     }
 };
 
-// [ADMIN] Obtener un usuario por su ID
+// [ADMIN / SUPERVISOR] Obtener un usuario por su ID
 exports.getUserById = async (req, res) => {
     try {
         const { id } = req.params;
-        const [users] = await db.query('SELECT id_user, nombre, correo, telefono, rol, is_active, created_at FROM Users WHERE id_user = ?', [id]);
-        
-        if (users.length === 0) {
-            return res.status(404).json({ message: 'Usuario no encontrado' });
+        const requestingUser = req.user;
+
+        if (requestingUser.rol === 'SUPERVISOR') {
+            const isManaged = await isUserManagedBySupervisor(id, requestingUser.id);
+            if (!isManaged) {
+                return res.status(403).json({ message: 'No tiene permiso para ver este usuario.' });
+            }
         }
+
+        const [users] = await db.query('SELECT id_user, nombre, correo, telefono, rol, is_active, created_at FROM Users WHERE id_user = ?', [id]);
+        if (users.length === 0) return res.status(404).json({ message: 'Usuario no encontrado' });
+        
         res.json(users[0]);
     } catch (error) {
         console.error('Error al obtener usuario por ID:', error);
@@ -29,38 +128,42 @@ exports.getUserById = async (req, res) => {
     }
 };
 
-// [ADMIN] Actualizar un usuario
+// [ADMIN / SUPERVISOR] Actualizar un usuario
 exports.updateUser = async (req, res) => {
     try {
         const { id } = req.params;
         const { nombre, correo, telefono, rol, is_active } = req.body;
+        const requestingUser = req.user;
 
-        if (!nombre || !correo || !rol || is_active === undefined) {
+        if (requestingUser.rol === 'SUPERVISOR') {
+            const isManaged = await isUserManagedBySupervisor(id, requestingUser.id);
+            if (!isManaged) {
+                return res.status(403).json({ message: 'No tiene permiso para actualizar este usuario.' });
+            }
+            if (rol && rol !== 'USER') {
+                return res.status(403).json({ message: 'Un supervisor no puede cambiar el rol de un usuario.' });
+            }
+        }
+
+        if (!nombre || !correo || rol === undefined || is_active === undefined) {
             return res.status(400).json({ message: 'Nombre, correo, rol y is_active son campos requeridos.' });
         }
 
-        // Verificar que el nuevo correo no esté en uso por OTRO usuario
         const [existing] = await db.query('SELECT id_user FROM Users WHERE correo = ? AND id_user != ?', [correo, id]);
-        if (existing.length > 0) {
-            return res.status(400).json({ message: 'El correo electrónico ya está en uso por otro usuario.' });
-        }
+        if (existing.length > 0) return res.status(400).json({ message: 'El correo ya está en uso por otro usuario.' });
 
         const [result] = await db.query(
             'UPDATE Users SET nombre = ?, correo = ?, telefono = ?, rol = ?, is_active = ? WHERE id_user = ?',
             [nombre, correo, telefono, rol, is_active, id]
         );
+        if (result.affectedRows === 0) return res.status(404).json({ message: 'Usuario no encontrado' });
 
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ message: 'Usuario no encontrado' });
-        }
-
-        // Registrar auditoría
         logAction({
-            id_user_action: req.user.id,
+            id_user_action: requestingUser.id,
             action_type: 'USER_UPDATE',
             target_entity: 'Users',
             target_id: id,
-            details: `El administrador ${req.user.id} actualizó al usuario ${id}.`
+            details: `El usuario ${requestingUser.id} (${requestingUser.rol}) actualizó al usuario ${id}.`
         });
 
         res.json({ message: 'Usuario actualizado exitosamente' });
@@ -70,36 +173,38 @@ exports.updateUser = async (req, res) => {
     }
 };
 
-// [ADMIN] Eliminar un usuario
+// [ADMIN / SUPERVISOR] Eliminar un usuario
 exports.deleteUser = async (req, res) => {
     try {
         const { id } = req.params;
+        const requestingUser = req.user;
 
-        // Opcional: Verificar que no se pueda eliminar al usuario ADMIN principal (si existe, ej: id 1)
-        if (parseInt(id, 10) === 1) {
+        if (requestingUser.rol === 'SUPERVISOR') {
+            const isManaged = await isUserManagedBySupervisor(id, requestingUser.id);
+            if (!isManaged) {
+                return res.status(403).json({ message: 'No tiene permiso para eliminar este usuario.' });
+            }
+        }
+
+        if (parseInt(id, 10) === 1) { // Proteger al super-admin
             return res.status(403).json({ message: 'No se puede eliminar al administrador principal.' });
         }
 
         const [result] = await db.query('DELETE FROM Users WHERE id_user = ?', [id]);
+        if (result.affectedRows === 0) return res.status(404).json({ message: 'Usuario no encontrado' });
 
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ message: 'Usuario no encontrado' });
-        }
-
-        // Registrar auditoría
         logAction({
-            id_user_action: req.user.id,
+            id_user_action: requestingUser.id,
             action_type: 'USER_DELETE',
             target_entity: 'Users',
             target_id: id,
-            details: `El administrador ${req.user.id} eliminó al usuario ${id}.`
+            details: `El usuario ${requestingUser.id} (${requestingUser.rol}) eliminó al usuario ${id}.`
         });
 
         res.json({ message: 'Usuario eliminado exitosamente' });
     } catch (error) {
-        // Manejar error de clave foránea si el usuario está referenciado en otras tablas
         if (error.code === 'ER_ROW_IS_REFERENCED_2') {
-            return res.status(400).json({ message: 'No se puede eliminar el usuario porque está asignado a otras entidades (reportes, alertas, etc.). Primero debe reasignar o eliminar esas dependencias.' });
+            return res.status(400).json({ message: 'No se puede eliminar el usuario porque tiene datos asociados (reportes, alertas, etc.).' });
         }
         console.error('Error al eliminar usuario:', error);
         res.status(500).json({ message: 'Error interno al eliminar usuario' });

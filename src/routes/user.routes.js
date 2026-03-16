@@ -3,19 +3,25 @@ const router = express.Router();
 const userController = require('../controllers/user.controller');
 const { verifyToken, checkRole } = require('../middlewares/auth.middleware');
 
-// Todas las rutas en este archivo están protegidas y requieren rol de ADMIN
-router.use(verifyToken, checkRole(['ADMIN']));
+// Middleware para todas las rutas de este fichero: deben estar autenticados.
+router.use(verifyToken);
 
-// GET /api/users -> Obtener todos los usuarios
-router.get('/', userController.getAllUsers);
+// Rutas con sus respectivos permisos por rol
+const canManageUsers = checkRole(['ADMIN', 'SUPERVISOR']);
 
-// GET /api/users/:id -> Obtener un usuario por ID
-router.get('/:id', userController.getUserById);
+// POST /api/users -> Crear un nuevo usuario (ADMIN crea cualquier rol, SUPERVISOR crea solo USER)
+router.post('/', canManageUsers, userController.createUser);
 
-// PUT /api/users/:id -> Actualizar un usuario
-router.put('/:id', userController.updateUser);
+// GET /api/users -> Obtener todos los usuarios (ADMIN ve todos, SUPERVISOR solo los suyos)
+router.get('/', canManageUsers, userController.getAllUsers);
 
-// DELETE /api/users/:id -> Eliminar un usuario
-router.delete('/:id', userController.deleteUser);
+// GET /api/users/:id -> Obtener un usuario por ID (SUPERVISOR solo puede ver los suyos)
+router.get('/:id', canManageUsers, userController.getUserById);
+
+// PUT /api/users/:id -> Actualizar un usuario (SUPERVISOR solo puede actualizar los suyos)
+router.put('/:id', canManageUsers, userController.updateUser);
+
+// DELETE /api/users/:id -> Eliminar un usuario (SUPERVISOR solo puede eliminar los suyos)
+router.delete('/:id', canManageUsers, userController.deleteUser);
 
 module.exports = router;

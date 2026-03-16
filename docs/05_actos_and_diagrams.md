@@ -7,7 +7,7 @@ El sistema define roles específicos con permisos diferenciados sobre la informa
 | Rol | Descripción | Permisos Principales |
 | :--- | :--- | :--- |
 | **`ADMIN`** | Administrador del sistema global. | Control total (CRUD) de usuarios, clientes, geocercas y reportes. |
-| **`SUPERVISOR`** | Personal de monitoreo operativo. | Ver y monitorear a los usuarios que le han sido asignados. Solo lectura. |
+| **`SUPERVISOR`** | Personal de monitoreo operativo. | CRUD (Crear, Leer, Actualizar, Eliminar) de los usuarios que tiene asignados. |
 | **`CLIENT`** | Representante de una empresa (cliente). | Ver y gestionar al personal y reportes asociados a su organización. |
 | **`USER`** | Usuario rastreado (conductor/operario). | Transmitir ubicación, aceptar consentimiento y ver su propio estado. |
 
