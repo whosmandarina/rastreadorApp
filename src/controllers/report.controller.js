@@ -3,6 +3,19 @@ const PDFDocument = require('pdfkit');
 const ExcelJS = require('exceljs');
 const geolib = require('geolib');
 
+// Zona horaria de México
+const TIMEZONE = 'America/Mexico_City';
+
+// Formatea una fecha UTC a hora local de México
+function fmtDate(date) {
+    return new Date(date).toLocaleString('es-MX', {
+        timeZone: TIMEZONE,
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour12: false
+    });
+}
+
 // Obtener ruta (puntos de ubicación) en un rango de fechas
 exports.getRoute = async (req, res) => {
     try {
@@ -25,7 +38,7 @@ exports.getRoute = async (req, res) => {
     }
 };
 
-// Obtener estadísticas (Velocidad promedio, tiempos de parada)
+// Obtener estadísticas
 exports.getStats = async (req, res) => {
     try {
         const { userId } = req.params;
@@ -44,13 +57,9 @@ exports.getStats = async (req, res) => {
             return res.json({ velocidad_promedio: 0, paradas: [], tiempo_total_parado_minutos: 0 });
         }
 
-        let totalSpeed = 0;
-        let speedCount = 0;
-        let paradas = [];
-        let posibleParada = null;
+        let totalSpeed = 0, speedCount = 0, paradas = [], posibleParada = null;
 
-        for (let i = 0; i < locations.length; i++) {
-            const loc = locations[i];
+        for (const loc of locations) {
             if (loc.velocidad !== null && loc.velocidad > 0) {
                 totalSpeed += loc.velocidad;
                 speedCount++;
@@ -64,24 +73,20 @@ exports.getStats = async (req, res) => {
                 }
             } else {
                 if (posibleParada) {
-                    const duracionMinutos = (new Date(posibleParada.end) - new Date(posibleParada.start)) / 1000 / 60;
-                    if (duracionMinutos >= 3) {
-                        paradas.push({ ...posibleParada, duracion_minutos: duracionMinutos });
-                    }
+                    const dur = (new Date(posibleParada.end) - new Date(posibleParada.start)) / 60000;
+                    if (dur >= 3) paradas.push({ ...posibleParada, duracion_minutos: dur.toFixed(1) });
                     posibleParada = null;
                 }
             }
         }
 
         if (posibleParada) {
-            const duracionMinutos = (new Date(posibleParada.end) - new Date(posibleParada.start)) / 1000 / 60;
-            if (duracionMinutos >= 3) {
-                paradas.push({ ...posibleParada, duracion_minutos: duracionMinutos });
-            }
+            const dur = (new Date(posibleParada.end) - new Date(posibleParada.start)) / 60000;
+            if (dur >= 3) paradas.push({ ...posibleParada, duracion_minutos: dur.toFixed(1) });
         }
 
         const velocidad_promedio = speedCount > 0 ? (totalSpeed / speedCount) : 0;
-        const tiempo_total_parado = paradas.reduce((acc, p) => acc + p.duracion_minutos, 0);
+        const tiempo_total_parado = paradas.reduce((acc, p) => acc + parseFloat(p.duracion_minutos), 0);
 
         res.json({
             velocidad_promedio: velocidad_promedio.toFixed(2),
@@ -101,21 +106,16 @@ exports.exportPDF = async (req, res) => {
         const { userId } = req.params;
         const { startDate, endDate } = req.query;
 
-        if (!startDate || !endDate) {
-            return res.status(400).json({ message: 'Se requieren startDate y endDate' });
-        }
-
         const [users] = await db.query('SELECT nombre, correo FROM Users WHERE id_user = ?', [userId]);
         const user = users[0];
         if (!user) return res.status(404).json({ message: 'Usuario no encontrado' });
 
-        // Obtener ubicaciones igual que el Excel
         const [locations] = await db.query(
             'SELECT latitud, longitud, velocidad, bateria, timestamp_captura FROM Locations WHERE id_user = ? AND timestamp_captura BETWEEN ? AND ? ORDER BY timestamp_captura ASC',
             [userId, new Date(startDate), new Date(endDate)]
         );
 
-        // Calcular stats para el resumen
+        // Calcular stats
         let totalSpeed = 0, speedCount = 0, paradas = [], posibleParada = null;
         for (const loc of locations) {
             if (loc.velocidad > 0) { totalSpeed += loc.velocidad; speedCount++; }
@@ -143,7 +143,7 @@ exports.exportPDF = async (req, res) => {
         res.setHeader('Content-Disposition', `attachment; filename=Reporte_${user.nombre.replace(/ /g, '_')}.pdf`);
         doc.pipe(res);
 
-        // ── Encabezado ──
+        // Encabezado
         doc.rect(0, 0, doc.page.width, 80).fill('#02182b');
         doc.fillColor('#ffffff').fontSize(20).font('Helvetica-Bold')
             .text('REPORTE DE ACTIVIDAD', 40, 25, { align: 'center' });
@@ -151,17 +151,17 @@ exports.exportPDF = async (req, res) => {
             .text('Sistema de Rastreo', 40, 50, { align: 'center' });
         doc.moveDown(3);
 
-        // ── Info del usuario ──
+        // Info usuario
         doc.fillColor('#02182b').fontSize(13).font('Helvetica-Bold').text('Información del Usuario');
         doc.moveTo(40, doc.y).lineTo(doc.page.width - 40, doc.y).strokeColor('#daeeed').lineWidth(1).stroke();
         doc.moveDown(0.5);
         doc.fontSize(11).font('Helvetica').fillColor('#3a5a6e')
             .text(`Nombre:   ${user.nombre}`)
             .text(`Correo:   ${user.correo}`)
-            .text(`Período:  ${new Date(startDate).toLocaleString('es-MX')} — ${new Date(endDate).toLocaleString('es-MX')}`);
+            .text(`Período:  ${fmtDate(startDate)} — ${fmtDate(endDate)}`);
         doc.moveDown(1.5);
 
-        // ── Resumen estadístico ──
+        // Resumen
         doc.fillColor('#02182b').fontSize(13).font('Helvetica-Bold').text('Resumen del Período');
         doc.moveTo(40, doc.y).lineTo(doc.page.width - 40, doc.y).strokeColor('#daeeed').lineWidth(1).stroke();
         doc.moveDown(0.5);
@@ -172,19 +172,19 @@ exports.exportPDF = async (req, res) => {
             .text(`Paradas detectadas (≥3 min):   ${paradas.length}`);
         doc.moveDown(1.5);
 
-        // ── Paradas ──
+        // Paradas
         if (paradas.length > 0) {
             doc.fillColor('#02182b').fontSize(13).font('Helvetica-Bold').text('Paradas Detectadas');
             doc.moveTo(40, doc.y).lineTo(doc.page.width - 40, doc.y).strokeColor('#daeeed').lineWidth(1).stroke();
             doc.moveDown(0.5);
             paradas.forEach((p, i) => {
                 doc.fontSize(10).font('Helvetica').fillColor('#3a5a6e')
-                    .text(`${i + 1}.  Inicio: ${new Date(p.start).toLocaleString('es-MX')}   →   Fin: ${new Date(p.end).toLocaleString('es-MX')}   (${p.duracion_minutos} min)`);
+                    .text(`${i + 1}.  Inicio: ${fmtDate(p.start)}   →   Fin: ${fmtDate(p.end)}   (${p.duracion_minutos} min)`);
             });
             doc.moveDown(1.5);
         }
 
-        // ── Tabla de ubicaciones ──
+        // Tabla de ubicaciones
         doc.fillColor('#02182b').fontSize(13).font('Helvetica-Bold').text('Historial de Ubicaciones');
         doc.moveTo(40, doc.y).lineTo(doc.page.width - 40, doc.y).strokeColor('#daeeed').lineWidth(1).stroke();
         doc.moveDown(0.5);
@@ -193,7 +193,6 @@ exports.exportPDF = async (req, res) => {
             doc.fontSize(11).font('Helvetica').fillColor('#6b8a9a')
                 .text('No se registraron ubicaciones en este período.');
         } else {
-            // Encabezados de tabla
             const tableTop = doc.y;
             const colWidths = [140, 80, 85, 80, 70];
             const colX = [40, 180, 260, 345, 425];
@@ -206,7 +205,6 @@ exports.exportPDF = async (req, res) => {
             });
             doc.y = tableTop + 22;
 
-            // Filas — máximo 200 para no exceder el PDF
             const maxRows = Math.min(locations.length, 200);
             for (let i = 0; i < maxRows; i++) {
                 const loc = locations[i];
@@ -215,7 +213,7 @@ exports.exportPDF = async (req, res) => {
                 doc.rect(40, rowY, doc.page.width - 80, 16).fill(bg);
 
                 const rowData = [
-                    new Date(loc.timestamp_captura).toLocaleString('es-MX'),
+                    fmtDate(loc.timestamp_captura),   // ← hora local México
                     parseFloat(loc.latitud).toFixed(6),
                     parseFloat(loc.longitud).toFixed(6),
                     `${loc.velocidad || 0} km/h`,
@@ -227,7 +225,6 @@ exports.exportPDF = async (req, res) => {
                 });
                 doc.y = rowY + 16;
 
-                // Nueva página si se acaba el espacio
                 if (doc.y > doc.page.height - 60) {
                     doc.addPage();
                     doc.y = 40;
@@ -241,10 +238,10 @@ exports.exportPDF = async (req, res) => {
             }
         }
 
-        // ── Pie de página ──
+        // Pie
         doc.moveDown(2);
         doc.fontSize(9).fillColor('#6b8a9a').font('Helvetica')
-            .text(`Generado el ${new Date().toLocaleString('es-MX')} — Sistema de Rastreo`, { align: 'center' });
+            .text(`Generado el ${fmtDate(new Date())} (hora de México) — Sistema de Rastreo`, { align: 'center' });
 
         doc.end();
 
@@ -268,17 +265,24 @@ exports.exportExcel = async (req, res) => {
         const workbook = new ExcelJS.Workbook();
         const sheet = workbook.addWorksheet('Ruta Recorrida');
 
+        // Estilo del encabezado
         sheet.columns = [
-            { header: 'Fecha y Hora', key: 'timestamp', width: 25 },
+            { header: 'Fecha y Hora (México)', key: 'timestamp', width: 25 },
             { header: 'Latitud', key: 'lat', width: 15 },
             { header: 'Longitud', key: 'lng', width: 15 },
             { header: 'Velocidad (km/h)', key: 'vel', width: 18 },
             { header: 'Batería (%)', key: 'bat', width: 15 },
         ];
 
+        // Estilo encabezado
+        sheet.getRow(1).eachCell((cell) => {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF249A98' } };
+            cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        });
+
         locations.forEach(loc => {
             sheet.addRow({
-                timestamp: new Date(loc.timestamp_captura).toLocaleString(),
+                timestamp: fmtDate(loc.timestamp_captura),  // ← hora local México
                 lat: loc.latitud,
                 lng: loc.longitud,
                 vel: loc.velocidad || 0,
