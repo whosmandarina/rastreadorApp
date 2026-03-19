@@ -85,6 +85,8 @@ const userClientRoutes = require('./src/routes/user_client.routes');
 const supervisorUserRoutes = require('./src/routes/supervisor_user.routes');
 const consentRoutes = require('./src/routes/consent.routes');
 const userRoutes = require('./src/routes/user.routes');
+const auditRoutes = require('./src/routes/audit.routes');
+
 
 app.use('/api/auth', authRoutes);
 app.use('/api/locations', locationRoutes);
@@ -96,6 +98,7 @@ app.use('/api/user-clients', userClientRoutes);
 app.use('/api/supervisor-users', supervisorUserRoutes);
 app.use('/api/consents', consentRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/audit', auditRoutes);
 
 
 // Iniciar servidor
