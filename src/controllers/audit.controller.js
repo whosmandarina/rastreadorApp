@@ -6,7 +6,13 @@ exports.getAuditLogs = async (req, res) => {
 
         let query = `
             SELECT 
-                al.*,
+                al.id_audit,
+                al.id_user_action,
+                al.action_type,
+                al.target_entity,
+                al.target_id,
+                al.details,
+                al.timestamp_action,
                 u.nombre as usuario_nombre,
                 u.rol as usuario_rol
             FROM Audit_Logs al
@@ -20,15 +26,15 @@ exports.getAuditLogs = async (req, res) => {
             params.push(action_type);
         }
         if (startDate) {
-            query += ' AND al.created_at >= ?';
+            query += ' AND al.timestamp_action >= ?';
             params.push(new Date(startDate));
         }
         if (endDate) {
-            query += ' AND al.created_at <= ?';
+            query += ' AND al.timestamp_action <= ?';
             params.push(new Date(endDate));
         }
 
-        query += ' ORDER BY al.created_at DESC LIMIT ? OFFSET ?';
+        query += ' ORDER BY al.timestamp_action DESC LIMIT ? OFFSET ?';
         params.push(Number(limit), Number(offset));
 
         const [logs] = await db.query(query, params);
