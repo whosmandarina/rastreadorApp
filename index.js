@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
+const bcrypt = require('bcryptjs');
 const { Server } = require('socket.io');
 const dbPool = require('./src/config/db');
 
@@ -10,10 +11,10 @@ const server = http.createServer(app);
 
 // Configuración de Socket.IO para WebSockets (Tiempo real)
 const io = new Server(server, {
-    cors: {
-        origin: '*', // IMPORTANTE: En producción cambiar '*' por el dominio exacto del frontend
-        methods: ['GET', 'POST', 'PUT', 'DELETE']
-    }
+  cors: {
+    origin: '*', // IMPORTANTE: En producción cambiar '*' por el dominio exacto del frontend
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  },
 });
 
 const port = process.env.PORT || 3000;
@@ -22,25 +23,62 @@ const port = process.env.PORT || 3000;
 // Inicializar Base de Datos (MIGRACIÓN AUTO)
 // ==========================================
 const initDatabase = async () => {
-    try {
-        const fs = require('fs');
-        const path = require('path');
-        const sqlPath = path.join(__dirname, 'database', 'data', 'schema.sql');
-        
-        if (fs.existsSync(sqlPath)) {
-            const sql = fs.readFileSync(sqlPath, 'utf8');
-            await dbPool.query(sql);
-            
-            // Verificar qué tablas existen realmente
-            const [tables] = await dbPool.query('SHOW TABLES');
-            const tableNames = tables.map(t => Object.values(t)[0]);
-            console.log('📦 Tablas actuales en la BD:', tableNames.join(', '));
-            
-            console.log('✅ Base de datos lista para operar.');
-        }
-    } catch (err) {
-        console.error('❌ Error inicializando tablas:', err.message);
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const sqlPath = path.join(__dirname, 'database', 'data', 'schema.sql');
+
+    if (fs.existsSync(sqlPath)) {
+      const sql = fs.readFileSync(sqlPath, 'utf8');
+      await dbPool.query(sql);
+
+      // Verificar qué tablas existen realmente
+      const [tables] = await dbPool.query('SHOW TABLES');
+      const tableNames = tables.map((t) => Object.values(t)[0]);
+      console.log('📦 Tablas actuales en la BD:', tableNames.join(', '));
+
+      console.log('✅ Base de datos lista para operar.');
     }
+  } catch (err) {
+    console.error('❌ Error inicializando tablas:', err.message);
+  }
+};
+
+const ensureDevAdminUser = async () => {
+  const isDevelopment = process.env.NODE_ENV === 'development';
+
+  if (!isDevelopment) {
+    return;
+  }
+
+  try {
+    const adminName = process.env.DEV_ADMIN_NAME || 'Admin';
+    const adminEmail = process.env.DEV_ADMIN_EMAIL || 'admin@rastreador.local';
+    const adminPhone = process.env.DEV_ADMIN_PHONE || null;
+    const adminPassword = process.env.DEV_ADMIN_PASSWORD || 'admin1234';
+
+    const [existingRows] = await dbPool.query(
+      'SELECT id_user FROM Users WHERE correo = ? LIMIT 1',
+      [adminEmail],
+    );
+
+    if (existingRows.length > 0) {
+      console.log(`ℹ️ Usuario admin dev ya existe: ${adminEmail}`);
+      return;
+    }
+
+    const passwordHash = await bcrypt.hash(adminPassword, 10);
+
+    await dbPool.query(
+      `INSERT INTO Users (nombre, correo, telefono, password, rol, is_active)
+             VALUES (?, ?, ?, ?, 'ADMIN', 1)`,
+      [adminName, adminEmail, adminPhone, passwordHash],
+    );
+
+    console.log(`✅ Usuario admin dev creado automáticamente: ${adminEmail}`);
+  } catch (err) {
+    console.error('❌ Error creando usuario admin dev:', err.message);
+  }
 };
 
 // Middlewares Globales
@@ -48,15 +86,17 @@ app.use(cors());
 app.use(express.json()); // Para parsear el body de las peticiones a JSON
 
 // Probar conexión e inicializar tablas
-dbPool.getConnection()
-    .then(async (connection) => {
-        console.log('✅ Conectado exitosamente a MySQL (Pool de conexiones)');
-        connection.release();
-        await initDatabase(); // Crear tablas si no existen
-    })
-    .catch(err => {
-        console.error('❌ Error conectando a MySQL:', err.message);
-    });
+dbPool
+  .getConnection()
+  .then(async (connection) => {
+    console.log('✅ Conectado exitosamente a MySQL (Pool de conexiones)');
+    connection.release();
+    await initDatabase(); // Crear tablas si no existen
+    await ensureDevAdminUser(); // Seed admin en desarrollo
+  })
+  .catch((err) => {
+    console.error('❌ Error conectando a MySQL:', err.message);
+  });
 
 // Hacer 'io' accesible en los controladores si necesitamos emitir algo desde una ruta REST
 app.set('io', io);
@@ -71,7 +111,7 @@ setupSockets(io);
 // Rutas (API REST)
 // ==========================================
 app.get('/', (req, res) => {
-    res.send('Servidor API Rastreador en funcionamiento 🚀');
+  res.send('Servidor API Rastreador en funcionamiento 🚀');
 });
 
 // Registrar todas las rutas modulares
@@ -87,7 +127,6 @@ const consentRoutes = require('./src/routes/consent.routes');
 const userRoutes = require('./src/routes/user.routes');
 const auditRoutes = require('./src/routes/audit.routes');
 
-
 app.use('/api/auth', authRoutes);
 app.use('/api/locations', locationRoutes);
 app.use('/api/geofences', geofenceRoutes);
@@ -100,8 +139,7 @@ app.use('/api/consents', consentRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/audit', auditRoutes);
 
-
 // Iniciar servidor
-server.listen(port, "0.0.0.0", () => {
-    console.log(`🚀 Servidor escuchando en http://0.0.0.0:${port}`);
+server.listen(port, '0.0.0.0', () => {
+  console.log(`🚀 Servidor escuchando en http://0.0.0.0:${port}`);
 });
