@@ -125,7 +125,10 @@ exports.getAllUsers = async (req, res) => {
 
     if (rol === 'ADMIN') {
       [users] = await db.query(
-        'SELECT id_user, nombre, correo, telefono, rol, is_active, created_at FROM Users ORDER BY id_user DESC',
+        `SELECT u.id_user, u.nombre, u.correo, u.telefono, u.rol, u.is_active, u.created_at, su.id_supervisor
+       FROM Users u
+       LEFT JOIN Supervisor_User su ON u.id_user = su.id_user
+       ORDER BY u.id_user DESC`
       );
     } else if (rol === 'SUPERVISOR') {
       [users] = await db.query(
@@ -219,6 +222,14 @@ exports.updateUser = async (req, res) => {
 
     const targetCurrentRole = targetUsers[0].rol;
     const finalRole = requestingUser.rol === 'ADMIN' ? rol : targetCurrentRole;
+
+    // --- INICIO DEL NUEVO CÓDIGO ---
+    // Si el usuario está siendo promovido desde 'USER' a un rol superior,
+    // eliminamos su asignación de la tabla Supervisor_User.
+    if (targetCurrentRole === 'USER' && (finalRole === 'ADMIN' || finalRole === 'SUPERVISOR')) {
+      await db.query('DELETE FROM Supervisor_User WHERE id_user = ?', [id]);
+    }
+    // --- FIN DEL NUEVO CÓDIGO ---
 
     const [existing] = await db.query(
       'SELECT id_user FROM Users WHERE correo = ? AND id_user != ?',
